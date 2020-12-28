@@ -1,2 +1,2 @@
 # s2i-local
-PoC for building image from local
+CodeEngine S2I PoC for building image from local
