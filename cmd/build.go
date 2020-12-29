@@ -19,11 +19,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/mattmoor/mink/pkg/kontext"
 	"github.com/spf13/viper"
+	"github.com/tektoncd/cli/pkg/cli"
+	"github.ibm.com/cuixuex/s2i-local/pkg/builds"
+	"github.ibm.com/cuixuex/s2i-local/pkg/builds/dockerfile"
+	"io"
+	"knative.dev/pkg/injection"
+	"knative.dev/pkg/signals"
+	"net/url"
+	"text/template"
+	"time"
 
+	"github.com/mattmoor/mink/pkg/command"
 	"github.com/spf13/cobra"
+	"github.com/tektoncd/cli/pkg/options"
+	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
 )
 
 func NewBuildCommand(ctx context.Context) *cobra.Command {
@@ -51,7 +64,9 @@ to quickly creatree a Cobra application.`,
 }
 
 func init() {
-	rootCmd.AddCommand(NewBuildCommand(context.Background()))
+	// We do not start informers.
+	ctx, _ := injection.EnableInjectionOrDie(signals.NewContext(), nil)
+	rootCmd.AddCommand(NewBuildCommand(ctx))
 }
 
 // BuildOptions implements Interface for the `kn im build` command.
@@ -69,7 +84,28 @@ type BuildOptions struct {
 
 	// tag is the processed version of ImageName that is populated while validating it.
 	tag name.Tag
+
+	// tmpl is the template used to instantiate image names.
+	tmpl *template.Template
+
+	dockerfileOptions
+
+	ServiceAccount string
 }
+
+type dockerfileOptions struct {
+	// Dockerfile is the relative path to the Dockerfile within the build context.
+	Dockerfile string
+
+	// The extra kaniko arguments for handling things like insecure registries
+	KanikoArgs []string
+}
+
+type imageNameContext struct {
+	url.URL
+}
+
+const activityTimeout = 30 * time.Second
 
 // Validate implements Interface
 func (opts *BuildOptions) Validate(cmd *cobra.Command, args []string) error {
@@ -117,7 +153,18 @@ func (opts *BuildOptions) Execute(cmd *cobra.Command, args []string) error {
 		return errors.New("'im bundle' does not take any arguments")
 	}
 
-	digest, err := opts.bundle(opts.GetContext(cmd))
+	// Handle ctrl+C
+	ctx := opts.GetContext(cmd)
+	spew.Dump("ctx: %v", ctx)
+
+	sourceDigest, err := opts.bundle(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Run the produced Build definition to completion, streaming logs to stdout, and
+	// returning the digest of the produced image.
+	digest, err := opts.build(ctx, sourceDigest, cmd.OutOrStderr())
 	if err != nil {
 		return err
 	}
@@ -128,4 +175,31 @@ func (opts *BuildOptions) Execute(cmd *cobra.Command, args []string) error {
 // GetContext implements Interface
 func (opts *BuildOptions) GetContext(cmd *cobra.Command) context.Context {
 	return opts.ctx
+}
+
+func (opts *BuildOptions) build(ctx context.Context, sourceDigest name.Digest, w io.Writer) (name.Digest, error) {
+	tag, err := name.NewTag(opts.ImageName, name.WeakValidation)
+	if err != nil {
+		return name.Digest{}, err
+	}
+
+	// Create a Build definition for turning the source into an image by Dockerfile build.
+	tr := dockerfile.Build(ctx, sourceDigest, tag, dockerfile.Options{
+		Dockerfile: opts.Dockerfile,
+		KanikoArgs: opts.KanikoArgs,
+	})
+	tr.Namespace = command.Namespace()
+
+	// Run the produced Build definition to completion, streaming logs to stdout, and
+	// returning the digest of the produced image.
+	return builds.Run(ctx, tag.String(), tr, &options.LogOptions{
+		ActivityTimeout: activityTimeout,
+		Params:          &cli.TektonParams{},
+		Stream: &cli.Stream{
+			// Send Out to stderr so we can capture the digest for composition.
+			Out: w,
+			Err: w,
+		},
+		Follow: true,
+	}, builds.WithTaskServiceAccount(ctx, opts.ServiceAccount, tag, sourceDigest))
 }

@@ -15,7 +15,9 @@ limitations under the License.
 */
 package main
 
-import "github.ibm.com/cuixuex/s2i-local/cmd"
+import (
+	"github.ibm.com/cuixuex/s2i-local/cmd"
+)
 
 func main() {
 	cmd.Execute()
