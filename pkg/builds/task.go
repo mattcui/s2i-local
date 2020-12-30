@@ -167,7 +167,7 @@ func WithTaskServiceAccount(ctx context.Context, sa string, refs ...name.Referen
 		if tr.Spec.TaskSpec != nil {
 			// Mount the credentials secret as a volume.
 			//nolint:gosec Randomized to avoid collisions.
-			volumeName := fmt.Sprint("mink-creds-", rand.Uint64())
+			volumeName := fmt.Sprint("creds-", rand.Uint64())
 			tr.Spec.PodTemplate.Volumes = append(tr.Spec.PodTemplate.Volumes, corev1.Volume{
 				Name: volumeName,
 				VolumeSource: corev1.VolumeSource{
@@ -191,7 +191,7 @@ func WithTaskServiceAccount(ctx context.Context, sa string, refs ...name.Referen
 			// How we will mount the credentials into steps.
 			vm := corev1.VolumeMount{
 				Name:      volumeName,
-				MountPath: fmt.Sprint("/var/mink/creds/", rand.Uint64()), //nolint:gosec // Randomize to avoid hardcoding (weak ok)
+				MountPath: fmt.Sprint("/var/creds/", rand.Uint64()), //nolint:gosec // Randomize to avoid hardcoding (weak ok)
 			}
 
 			for i := range tr.Spec.TaskSpec.Steps {

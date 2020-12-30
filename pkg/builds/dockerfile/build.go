@@ -31,50 +31,51 @@ var (
 	// KanikoTaskString holds the raw definition of the Kaniko task.
 	// We export this into ./examples/kaniko.yaml
 	KanikoTaskString = `
+--- 
 apiVersion: tekton.dev/v1beta1
 kind: Task
 metadata:
   name: kaniko
 spec:
   description: "An example kaniko task illustrating some of the parameter processing."
-  params:
-    - name: mink-source-bundle
-      description: A self-extracting container image of source
-    - name: mink-image-target
-      description: Where to publish an image.
-    - name: path
-      description: The path to the dockerfile.
-      default: .
-    - name: dockerfile
-      description: The name of the dockerfile.
-      default: Dockerfile
-    - name: kaniko-args
-      description: Extra arguments to supply to kaniko
-      type: array
-      default: []
+  params: 
+    - 
+      description: "A self-extracting container image of source"
+      name: source-bundle
+    - 
+      description: "Where to publish an image."
+      name: image-target
 
-  results:
-    - name: mink-image-digest
-      description: The digest of the resulting image.
-
-  steps:
-    - name: extract-bundle
-      image: $(params.mink-source-bundle)
+  results: 
+    - 
+      description: "The digest of the resulting image."
+      name: image-digest
+  steps: 
+    - 
+      image: $(params.source-bundle)
+      name: extract-bundle
       workingDir: /workspace
-
-    - name: build-and-push
-      image: gcr.io/kaniko-project/executor:multi-arch
-      env:
-      - name: DOCKER_CONFIG
-        value: /tekton/home/.docker
-      args:
-      - --dockerfile=/workspace/$(params.path)/$(params.dockerfile)
-      - --context=/workspace
-      - --destination=$(params.mink-image-target)
-      - --digest-file=/tekton/results/mink-image-digest
-      - --cache=true
-      - --cache-ttl=24h
-      - $(params.kaniko-args)
+    - 
+      command: 
+        - sh
+        - "-c"
+        - "echo \"Hello, Kubernetes!\" && sleep 15"
+      image: busybox
+      name: debug
+    - 
+      args: 
+        - "--dockerfile=/workspace/Dockerfile"
+        - "--context=/workspace"
+        - "--destination=$(params.image-target)"
+        - "--digest-file=/tekton/results/image-digest"
+        - "--cache=true"
+        - "--cache-ttl=24h"
+      env: 
+        - 
+          name: DOCKER_CONFIG
+          value: /tekton/home/.docker
+      image: "gcr.io/kaniko-project/executor:multi-arch"
+      name: build-and-push
 `
 	// KanikoTask is the parsed form of KanikoTaskString.
 	KanikoTask tknv1beta1.Task
@@ -86,18 +87,9 @@ func init() {
 	}
 }
 
-// Options holds configuration options specific to Dockerfile builds
-type Options struct {
-	// Dockerfile is the path to the Dockerfile within the build context.
-	Dockerfile string
-
-	// The extra kaniko arguments for handling things like insecure registries
-	KanikoArgs []string
-}
-
 // Build returns a TaskRun suitable for performing a Dockerfile build over the
 // provided source and publishing to the target tag.
-func Build(ctx context.Context, source name.Reference, target name.Tag, opt Options) *tknv1beta1.TaskRun {
+func Build(ctx context.Context, source name.Reference, target name.Tag) *tknv1beta1.TaskRun {
 	return &tknv1beta1.TaskRun{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "dockerfile-",
@@ -113,16 +105,8 @@ func Build(ctx context.Context, source name.Reference, target name.Tag, opt Opti
 			}, {
 				Name:  constants.ImageTargetParam,
 				Value: *tknv1beta1.NewArrayOrString(target.String()),
-			}, {
-				Name:  "dockerfile",
-				Value: *tknv1beta1.NewArrayOrString(opt.Dockerfile),
-			}, {
-				Name: "kaniko-args",
-				Value: tknv1beta1.ArrayOrString{
-					Type:     tknv1beta1.ParamTypeArray,
-					ArrayVal: opt.KanikoArgs,
-				},
 			}},
 		},
 	}
 }
+

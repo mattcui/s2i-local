@@ -29,8 +29,6 @@ import (
 	"io"
 	"knative.dev/pkg/injection"
 	"knative.dev/pkg/signals"
-	"net/url"
-	"text/template"
 	"time"
 
 	"github.com/mattmoor/mink/pkg/command"
@@ -85,24 +83,7 @@ type BuildOptions struct {
 	// tag is the processed version of ImageName that is populated while validating it.
 	tag name.Tag
 
-	// tmpl is the template used to instantiate image names.
-	tmpl *template.Template
-
-	dockerfileOptions
-
 	ServiceAccount string
-}
-
-type dockerfileOptions struct {
-	// Dockerfile is the relative path to the Dockerfile within the build context.
-	Dockerfile string
-
-	// The extra kaniko arguments for handling things like insecure registries
-	KanikoArgs []string
-}
-
-type imageNameContext struct {
-	url.URL
 }
 
 const activityTimeout = 30 * time.Second
@@ -184,10 +165,7 @@ func (opts *BuildOptions) build(ctx context.Context, sourceDigest name.Digest, w
 	}
 
 	// Create a Build definition for turning the source into an image by Dockerfile build.
-	tr := dockerfile.Build(ctx, sourceDigest, tag, dockerfile.Options{
-		Dockerfile: opts.Dockerfile,
-		KanikoArgs: opts.KanikoArgs,
-	})
+	tr := dockerfile.Build(ctx, sourceDigest, tag)
 	tr.Namespace = command.Namespace()
 
 	// Run the produced Build definition to completion, streaming logs to stdout, and
