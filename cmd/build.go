@@ -25,6 +25,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/tektoncd/cli/pkg/cli"
 	"github.ibm.com/cuixuex/s2i-local/pkg/builds"
+	"github.ibm.com/cuixuex/s2i-local/pkg/builds/buildpacks"
 	"github.ibm.com/cuixuex/s2i-local/pkg/builds/dockerfile"
 	"io"
 	"knative.dev/pkg/injection"
@@ -87,6 +88,7 @@ type BuildOptions struct {
 }
 
 const activityTimeout = 30 * time.Second
+const SourceImageSuffix = "_source"
 
 // Validate implements Interface
 func (opts *BuildOptions) Validate(cmd *cobra.Command, args []string) error {
@@ -95,11 +97,11 @@ func (opts *BuildOptions) Validate(cmd *cobra.Command, args []string) error {
 
 	// See if we're in "kontext mode"
 	opts.Directory = viper.GetString("directory")
-	if opts.Directory == "" {
-		opts.Directory = "."
-	}
 
 	opts.Strategy = viper.GetString("strategy")
+	if opts.Strategy != "" && opts.Strategy != "kaniko" && opts.Strategy != "buildpack" {
+		return errors.New("not supported strategy specified, only support 'kaniko' and 'buildpack'")
+	}
 
 	if opts.ImageName == "" {
 		return errors.New("image url is required")
@@ -125,8 +127,11 @@ func (opts *BuildOptions) AddFlags(cmd *cobra.Command) {
 
 func (opts *BuildOptions) bundle(ctx context.Context) (name.Digest, error) {
 
-	return kontext.Bundle(ctx, opts.Directory, opts.tag)
-
+	bundleTag, err := name.NewTag(opts.tag.RegistryStr() + "/" + opts.tag.RepositoryStr() + SourceImageSuffix + ":" + opts.tag.TagStr())
+	if err != nil {
+		return name.Digest{}, err
+	}
+	return kontext.Bundle(ctx, opts.Directory, bundleTag)
 }
 
 func (opts *BuildOptions) Execute(cmd *cobra.Command, args []string) error {
@@ -144,11 +149,17 @@ func (opts *BuildOptions) Execute(cmd *cobra.Command, args []string) error {
 	}
 
 	// Run the produced Build definition to completion, streaming logs to stdout, and
-	// returning the digest of the produced image.
-	digest, err := opts.build(ctx, sourceDigest, cmd.OutOrStderr())
+	// returng the digest of the produced image.
+	var digest name.Digest
+	if opts.Strategy == "kaniko" {
+		digest, err = opts.build(ctx, sourceDigest, cmd.OutOrStderr())
+	} else if opts.Strategy == "buildpack" {
+		digest, err = opts.buildpack(ctx, sourceDigest, cmd.OutOrStderr())
+	}
 	if err != nil {
 		return err
 	}
+
 	fmt.Fprintf(cmd.OutOrStdout(), "%s\n", digest.String())
 	return nil
 }
@@ -166,6 +177,30 @@ func (opts *BuildOptions) build(ctx context.Context, sourceDigest name.Digest, w
 
 	// Create a Build definition for turning the source into an image by Dockerfile build.
 	tr := dockerfile.Build(ctx, sourceDigest, tag)
+	tr.Namespace = command.Namespace()
+
+	// Run the produced Build definition to completion, streaming logs to stdout, and
+	// returning the digest of the produced image.
+	return builds.Run(ctx, tag.String(), tr, &options.LogOptions{
+		ActivityTimeout: activityTimeout,
+		Params:          &cli.TektonParams{},
+		Stream: &cli.Stream{
+			// Send Out to stderr so we can capture the digest for composition.
+			Out: w,
+			Err: w,
+		},
+		Follow: true,
+	}, builds.WithTaskServiceAccount(ctx, opts.ServiceAccount, tag, sourceDigest))
+}
+
+func (opts *BuildOptions) buildpack(ctx context.Context, sourceDigest name.Digest, w io.Writer) (name.Digest, error) {
+	tag, err := name.NewTag(opts.ImageName, name.WeakValidation)
+	if err != nil {
+		return name.Digest{}, err
+	}
+
+	// Create a Build definition for turning the source into an image via CNCF Buildpacks.
+	tr := buildpacks.Build(ctx, sourceDigest, tag)
 	tr.Namespace = command.Namespace()
 
 	// Run the produced Build definition to completion, streaming logs to stdout, and
