@@ -4,11 +4,12 @@ go 1.15
 
 require (
 	github.com/davecgh/go-spew v1.1.1
-	github.com/ghodss/yaml v1.0.0
+	github.com/ghodss/yaml v1.0.1-0.20190212211648-25d852aebe32
 	github.com/google/go-cmp v0.5.4 // indirect
 	github.com/google/go-containerregistry v0.3.0
 	github.com/mattmoor/mink v0.19.0
 	github.com/mitchellh/go-homedir v1.1.0
+	github.com/shipwright-io/build v0.2.0
 	github.com/spf13/cobra v1.1.1
 	github.com/spf13/viper v1.7.1
 	github.com/stretchr/testify v1.6.1 // indirect
@@ -22,9 +23,7 @@ require (
 	knative.dev/pkg v0.0.0-20201103163404-5514ab0c1fdf
 )
 
-replace (
-	github.com/spf13/cobra => github.com/chmouel/cobra v0.0.0-20200107083527-379e7a80af0c
-)
+replace github.com/spf13/cobra => github.com/chmouel/cobra v0.0.0-20200107083527-379e7a80af0c
 
 replace (
 	k8s.io/api => k8s.io/api v0.18.8

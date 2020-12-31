@@ -17,42 +17,25 @@ limitations under the License.
 package dockerfile
 
 import (
-	"context"
-
 	"github.com/ghodss/yaml"
-	"github.com/google/go-containerregistry/pkg/name"
-	tknv1beta1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
-	"github.ibm.com/cuixuex/s2i-local/pkg/constants"
+	buildv1alpha1 "github.com/shipwright-io/build/pkg/apis/build/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"knative.dev/pkg/ptr"
 )
 
 var (
-	// KanikoTaskString holds the raw definition of the Kaniko task.
+	// KanikoBuildStrategyString holds the raw definition of the Kaniko-local buildStrategy.
 	// We export this into ./examples/kaniko.yaml
-	KanikoTaskString = `
+	KanikoBuildStrategyString = `
 --- 
-apiVersion: tekton.dev/v1beta1
-kind: Task
-metadata:
-  name: kaniko
-spec:
-  description: "An example kaniko task illustrating some of the parameter processing."
-  params: 
+apiVersion: build.dev/v1alpha1
+kind: ClusterBuildStrategy
+metadata: 
+  name: kaniko-local
+spec: 
+  buildSteps: 
     - 
-      description: "A self-extracting container image of source"
-      name: source-bundle
-    - 
-      description: "Where to publish an image."
-      name: image-target
-
-  results: 
-    - 
-      description: "The digest of the resulting image."
-      name: image-digest
-  steps: 
-    - 
-      image: $(params.source-bundle)
+      image: $(build.output.image)_source
       name: extract-bundle
       workingDir: /workspace
     - 
@@ -64,48 +47,123 @@ spec:
       name: debug
     - 
       args: 
+        - "--skip-tls-verify=true"
         - "--dockerfile=/workspace/Dockerfile"
         - "--context=/workspace"
-        - "--destination=$(params.image-target)"
-        - "--digest-file=/tekton/results/image-digest"
-        - "--cache=true"
-        - "--cache-ttl=24h"
+        - "--destination=$(build.output.image)"
+        - "--oci-layout-path=/workspace/output/image"
+        - "--snapshotMode=redo"
+      command: 
+        - /kaniko/executor
       env: 
         - 
           name: DOCKER_CONFIG
           value: /tekton/home/.docker
-      image: "gcr.io/kaniko-project/executor:multi-arch"
+        - 
+          name: AWS_ACCESS_KEY_ID
+          value: NOT_SET
+        - 
+          name: AWS_SECRET_KEY
+          value: NOT_SET
+      image: "gcr.io/kaniko-project/executor:v1.3.0"
       name: build-and-push
+      resources: 
+        limits: 
+          cpu: 500m
+          memory: 1Gi
+        requests: 
+          cpu: 250m
+          memory: 65Mi
+      securityContext: 
+        capabilities: 
+          add: 
+            - CHOWN
+            - DAC_OVERRIDE
+            - FOWNER
+            - SETGID
+            - SETUID
+            - SETFCAP
+        runAsUser: 0
+      workingDir: /workspace
 `
-	// KanikoTask is the parsed form of KanikoTaskString.
-	KanikoTask tknv1beta1.Task
+	// KanikoBuildStrategy is the parsed form of KanikoTaskString.
+	KanikoBuildStrategy buildv1alpha1.ClusterBuildStrategy
 )
 
+// Options holds configuration options specific to Dockerfile builds
+type Options struct {
+	// Dockerfile is the path to the Dockerfile within the build context.
+	//Dockerfile string
+	//
+	//// The extra kaniko arguments for handling things like insecure registries
+	//KanikoArgs []string
+
+	// Build name
+	Name string
+
+	// Target image
+	ImageURL string
+
+	// secret which is used to push target image
+	SecretName string
+}
+
 func init() {
-	if err := yaml.Unmarshal([]byte(KanikoTaskString), &KanikoTask); err != nil {
+	if err := yaml.Unmarshal([]byte(KanikoBuildStrategyString), &KanikoBuildStrategy); err != nil {
 		panic(err)
 	}
 }
 
-// Build returns a TaskRun suitable for performing a Dockerfile build over the
-// provided source and publishing to the target tag.
-func Build(ctx context.Context, source name.Reference, target name.Tag) *tknv1beta1.TaskRun {
-	return &tknv1beta1.TaskRun{
+// ClusterBuildStrategy returns a ClusterBuildStrategy object for performing a Kaniko local build.
+func ClusterBuildStrategy() *buildv1alpha1.ClusterBuildStrategy {
+	return &buildv1alpha1.ClusterBuildStrategy{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: "dockerfile-",
+			Name: "kaniko-local",
 		},
-		Spec: tknv1beta1.TaskRunSpec{
-			PodTemplate: &tknv1beta1.PodTemplate{
-				EnableServiceLinks: ptr.Bool(false),
+		Spec: *KanikoBuildStrategy.Spec.DeepCopy(),
+	}
+}
+
+// Build returns a Build object for performing a Dockerfile build over the
+// provided source and publishing to the target tag.
+func Build(opt Options) *buildv1alpha1.Build {
+	buildStrategy := buildv1alpha1.ClusterBuildStrategyKind
+
+	return &buildv1alpha1.Build{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: opt.Name,
+		},
+		Spec: buildv1alpha1.BuildSpec{
+			Source: buildv1alpha1.GitSource{
+				URL: "https://github.com/zhangtbj/empty-for-local-build",
 			},
-			TaskSpec: KanikoTask.Spec.DeepCopy(),
-			Params: []tknv1beta1.Param{{
-				Name:  constants.SourceBundleParam,
-				Value: *tknv1beta1.NewArrayOrString(source.String()),
-			}, {
-				Name:  constants.ImageTargetParam,
-				Value: *tknv1beta1.NewArrayOrString(target.String()),
-			}},
+			StrategyRef: &buildv1alpha1.StrategyRef{
+				Name: "kaniko-local",
+				Kind: &buildStrategy,
+			},
+			Output: buildv1alpha1.Image{
+				ImageURL: opt.ImageURL,
+				SecretRef: &corev1.LocalObjectReference{
+					Name: opt.SecretName,
+				},
+			},
+		},
+	}
+}
+
+// BuildRun returns a BuildRun object
+func BuildRun(buildName string) *buildv1alpha1.BuildRun {
+	return &buildv1alpha1.BuildRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: buildName + "buildrun",
+		},
+		Spec: buildv1alpha1.BuildRunSpec{
+			BuildRef: &buildv1alpha1.BuildRef{
+				Name: buildName,
+			},
+			ServiceAccount: &buildv1alpha1.ServiceAccount{
+				Generate: true,
+			},
 		},
 	}
 }

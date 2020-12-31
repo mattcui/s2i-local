@@ -19,22 +19,28 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	"os"
+	"path/filepath"
+
 	"github.com/davecgh/go-spew/spew"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/mattmoor/mink/pkg/kontext"
+
+	buildClient "github.com/shipwright-io/build/pkg/client/build/clientset/versioned"
 	"github.com/spf13/viper"
-	"github.com/tektoncd/cli/pkg/cli"
-	"github.ibm.com/cuixuex/s2i-local/pkg/builds"
 	"github.ibm.com/cuixuex/s2i-local/pkg/builds/buildpacks"
 	"github.ibm.com/cuixuex/s2i-local/pkg/builds/dockerfile"
 	"io"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"knative.dev/pkg/injection"
 	"knative.dev/pkg/signals"
 	"time"
 
 	"github.com/mattmoor/mink/pkg/command"
 	"github.com/spf13/cobra"
-	"github.com/tektoncd/cli/pkg/options"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
 )
 
@@ -85,6 +91,10 @@ type BuildOptions struct {
 	tag name.Tag
 
 	ServiceAccount string
+
+	Name string
+
+	SecretName string
 }
 
 const activityTimeout = 30 * time.Second
@@ -95,8 +105,20 @@ func (opts *BuildOptions) Validate(cmd *cobra.Command, args []string) error {
 	_ = viper.BindPFlags(cmd.Flags())
 	opts.ImageName = viper.GetString("image")
 
+	opts.Name = viper.GetString("name")
+	if opts.Name == "" {
+		return errors.New("image url is required")
+	} else {
+		opts.Name = viper.GetString("name")
+	}
+
 	// See if we're in "kontext mode"
 	opts.Directory = viper.GetString("directory")
+
+	opts.SecretName = viper.GetString("secret")
+	if opts.SecretName == "" {
+		opts.SecretName = "icr-knbuild"
+	}
 
 	opts.Strategy = viper.GetString("strategy")
 	if opts.Strategy != "" && opts.Strategy != "kaniko" && opts.Strategy != "buildpack" {
@@ -120,6 +142,7 @@ func (opts *BuildOptions) AddFlags(cmd *cobra.Command) {
 	cmd.Flags().StringP("directory", "d", ".", "The directory to bundle up")
 	cmd.Flags().StringP("image", "i", "", "The image to generate and publish")
 	cmd.Flags().StringP("strategy", "s", "local", "The build strategy to build the image")
+	cmd.Flags().StringP("secret", "e", "icr-knbuild", "The secret used to push target image and pull bundled source code image")
 
 	_ = cmd.MarkPersistentFlagRequired("name")
 	_ = cmd.MarkPersistentFlagRequired("image")
@@ -148,11 +171,14 @@ func (opts *BuildOptions) Execute(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	spew.Dump("name: ", opts.Name)
+	spew.Dump("secret: ", opts.SecretName)
+	spew.Dump("imageURL: ", opts.ImageName)
 	// Run the produced Build definition to completion, streaming logs to stdout, and
 	// returng the digest of the produced image.
 	var digest name.Digest
 	if opts.Strategy == "kaniko" {
-		digest, err = opts.build(ctx, sourceDigest, cmd.OutOrStderr())
+		err = opts.build(ctx, sourceDigest, cmd.OutOrStderr())
 	} else if opts.Strategy == "buildpack" {
 		digest, err = opts.buildpack(ctx, sourceDigest, cmd.OutOrStderr())
 	}
@@ -161,6 +187,7 @@ func (opts *BuildOptions) Execute(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "%s\n", digest.String())
+
 	return nil
 }
 
@@ -169,28 +196,59 @@ func (opts *BuildOptions) GetContext(cmd *cobra.Command) context.Context {
 	return opts.ctx
 }
 
-func (opts *BuildOptions) build(ctx context.Context, sourceDigest name.Digest, w io.Writer) (name.Digest, error) {
-	tag, err := name.NewTag(opts.ImageName, name.WeakValidation)
+func (opts *BuildOptions) build(ctx context.Context, sourceDigest name.Digest, w io.Writer) error {
+	//tag, err := name.NewTag(opts.ImageName, name.WeakValidation)
+	//if err != nil {
+	//	return err
+	//}
+
+	// Create a ClusterBuildStrategy definition
+	cbs := dockerfile.ClusterBuildStrategy()
+	spew.Dump("cbs: ", cbs)
+
+	// Create a Build definition
+	b := dockerfile.Build(dockerfile.Options{
+		Name:       opts.Name,
+		ImageURL:   opts.ImageName,
+		SecretName: opts.SecretName,
+	})
+	b.Namespace = command.Namespace()
+
+	// Create a BuildRun definition
+	br := dockerfile.BuildRun(opts.Name)
+	br.Namespace = command.Namespace()
+
+	var BuildClientSet *buildClient.Clientset
+	BuildClientSet, err := NewClient()
 	if err != nil {
-		return name.Digest{}, err
+		return err
+	}
+	// Create a ClusterBuildStrategy object
+	cbsInterface := BuildClientSet.BuildV1alpha1().ClusterBuildStrategies()
+	spew.Dump("cbsInterface: ", cbsInterface)
+	clusterBuildStrategy, err := cbsInterface.Create(context.TODO(), cbs, metav1.CreateOptions{})
+	spew.Dump("ClusterBuildStrategy: ", clusterBuildStrategy)
+	if err != nil {
+		return err
 	}
 
-	// Create a Build definition for turning the source into an image by Dockerfile build.
-	tr := dockerfile.Build(ctx, sourceDigest, tag)
-	tr.Namespace = command.Namespace()
+	// Create a Build object
+	bInterface := BuildClientSet.BuildV1alpha1().Builds(b.Namespace)
+	build, err := bInterface.Create(ctx, b, metav1.CreateOptions{})
+	spew.Dump("Build: ", build)
+	if err != nil {
+		return err
+	}
 
-	// Run the produced Build definition to completion, streaming logs to stdout, and
-	// returning the digest of the produced image.
-	return builds.Run(ctx, tag.String(), tr, &options.LogOptions{
-		ActivityTimeout: activityTimeout,
-		Params:          &cli.TektonParams{},
-		Stream: &cli.Stream{
-			// Send Out to stderr so we can capture the digest for composition.
-			Out: w,
-			Err: w,
-		},
-		Follow: true,
-	}, builds.WithTaskServiceAccount(ctx, opts.ServiceAccount, tag, sourceDigest))
+	// Create a BuildRun object
+	brInterface := BuildClientSet.BuildV1alpha1().BuildRuns(br.Namespace)
+	buildRun, err := brInterface.Create(ctx, br, metav1.CreateOptions{})
+	spew.Dump("BuildRun: ", buildRun)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (opts *BuildOptions) buildpack(ctx context.Context, sourceDigest name.Digest, w io.Writer) (name.Digest, error) {
@@ -203,16 +261,44 @@ func (opts *BuildOptions) buildpack(ctx context.Context, sourceDigest name.Diges
 	tr := buildpacks.Build(ctx, sourceDigest, tag)
 	tr.Namespace = command.Namespace()
 
-	// Run the produced Build definition to completion, streaming logs to stdout, and
-	// returning the digest of the produced image.
-	return builds.Run(ctx, tag.String(), tr, &options.LogOptions{
-		ActivityTimeout: activityTimeout,
-		Params:          &cli.TektonParams{},
-		Stream: &cli.Stream{
-			// Send Out to stderr so we can capture the digest for composition.
-			Out: w,
-			Err: w,
-		},
-		Follow: true,
-	}, builds.WithTaskServiceAccount(ctx, opts.ServiceAccount, tag, sourceDigest))
+	return name.Digest{}, nil
+}
+
+// NewClient return a build Client
+func NewClient() (*buildClient.Clientset, error) {
+	_, restConfig, err := KubeConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	buildClientSet, err := buildClient.NewForConfig(restConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	return buildClientSet, nil
+}
+
+// KubeConfig returns all required clients to speak with
+// the k8s API
+func KubeConfig() (*kubernetes.Clientset, *rest.Config, error) {
+	location := os.Getenv("KUBECONFIG")
+	if location == "" {
+		location = filepath.Join(os.Getenv("HOME"), ".kube", "config")
+	}
+
+	config, err := clientcmd.BuildConfigFromFlags("", location)
+	if err != nil {
+		config, err = rest.InClusterConfig()
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return clientset, config, nil
 }

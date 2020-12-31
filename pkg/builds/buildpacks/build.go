@@ -18,7 +18,6 @@ package buildpacks
 
 import (
 	"context"
-	"strings"
 
 	"github.com/ghodss/yaml"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -46,9 +45,9 @@ const (
 var (
 	// ExtractDigestImageString holds a reference to a built image of ./cmd/extract-digest
 	// See ./hack/build-flags.sh for how this is replaced at link-time.
-	ExtractDigestImageString = "ghcr.io/mattmoor/github.com/mattmoor/mink/cmd/extract-digest:latest"
-	// ExtractDigestImage is where we publish ./cmd/extract-digest
-	ExtractDigestImage, _ = name.ParseReference(ExtractDigestImageString)
+	//ExtractDigestImageString = "ghcr.io/mattmoor/github.com/mattmoor/mink/cmd/extract-digest:latest"
+	//// ExtractDigestImage is where we publish ./cmd/extract-digest
+	//ExtractDigestImage, _ = name.ParseReference(ExtractDigestImageString)
 
 	// BuildpackTaskString holds the raw definition of the Buildpack task.
 	// We export this into ./examples/buildpack.yaml
@@ -152,22 +151,21 @@ spec:
 )
 
 func init() {
-	// Replace the ko strings we use for the sample with the values the build process has injected.
-	substitutions := map[string]string{
-		"ko://github.com/mattmoor/mink/cmd/platform-setup": PlatformSetupImageString,
-		"ko://github.com/mattmoor/mink/cmd/extract-digest": ExtractDigestImageString,
-	}
+	//// Replace the ko strings we use for the sample with the values the build process has injected.
+	//substitutions := map[string]string{
+	//	"ko://github.com/mattmoor/mink/cmd/platform-setup": PlatformSetupImageString,
+	//	"ko://github.com/mattmoor/mink/cmd/extract-digest": ExtractDigestImageString,
+	//}
+	//
+	//raw := BuildpackTaskString
+	//for k, v := range substitutions {
+	//	raw = strings.ReplaceAll(raw, k, v)
+	//}
 
-	raw := BuildpackTaskString
-	for k, v := range substitutions {
-		raw = strings.ReplaceAll(raw, k, v)
-	}
-
-	if err := yaml.Unmarshal([]byte(raw), &BuildpackTask); err != nil {
+	if err := yaml.Unmarshal([]byte(BuildpackTaskString), &BuildpackTask); err != nil {
 		panic(err)
 	}
 }
-
 
 // Build synthesizes a TaskRun definition that evaluates the buildpack lifecycle with the
 // given options over the provided source.
