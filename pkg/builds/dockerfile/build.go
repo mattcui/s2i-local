@@ -19,7 +19,6 @@ package dockerfile
 import (
 	"github.com/ghodss/yaml"
 	buildv1alpha1 "github.com/shipwright-io/build/pkg/apis/build/v1alpha1"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -90,24 +89,6 @@ spec:
 	KanikoBuildStrategy buildv1alpha1.ClusterBuildStrategy
 )
 
-// Options holds configuration options specific to Dockerfile builds
-type Options struct {
-	// Dockerfile is the path to the Dockerfile within the build context.
-	//Dockerfile string
-	//
-	//// The extra kaniko arguments for handling things like insecure registries
-	//KanikoArgs []string
-
-	// Build name
-	Name string
-
-	// Target image
-	ImageURL string
-
-	// secret which is used to push target image
-	SecretName string
-}
-
 func init() {
 	if err := yaml.Unmarshal([]byte(KanikoBuildStrategyString), &KanikoBuildStrategy); err != nil {
 		panic(err)
@@ -115,7 +96,7 @@ func init() {
 }
 
 // ClusterBuildStrategy returns a ClusterBuildStrategy object for performing a Kaniko local build.
-func ClusterBuildStrategy() *buildv1alpha1.ClusterBuildStrategy {
+func KanikoClusterBuildStrategy() *buildv1alpha1.ClusterBuildStrategy {
 	return &buildv1alpha1.ClusterBuildStrategy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "kaniko-local",
@@ -124,46 +105,3 @@ func ClusterBuildStrategy() *buildv1alpha1.ClusterBuildStrategy {
 	}
 }
 
-// Build returns a Build object for performing a Dockerfile build over the
-// provided source and publishing to the target tag.
-func Build(opt Options) *buildv1alpha1.Build {
-	buildStrategy := buildv1alpha1.ClusterBuildStrategyKind
-
-	return &buildv1alpha1.Build{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: opt.Name,
-		},
-		Spec: buildv1alpha1.BuildSpec{
-			Source: buildv1alpha1.GitSource{
-				URL: "https://github.com/zhangtbj/empty-for-local-build",
-			},
-			StrategyRef: &buildv1alpha1.StrategyRef{
-				Name: "kaniko-local",
-				Kind: &buildStrategy,
-			},
-			Output: buildv1alpha1.Image{
-				ImageURL: opt.ImageURL,
-				SecretRef: &corev1.LocalObjectReference{
-					Name: opt.SecretName,
-				},
-			},
-		},
-	}
-}
-
-// BuildRun returns a BuildRun object
-func BuildRun(buildName string) *buildv1alpha1.BuildRun {
-	return &buildv1alpha1.BuildRun{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: buildName + "buildrun",
-		},
-		Spec: buildv1alpha1.BuildRunSpec{
-			BuildRef: &buildv1alpha1.BuildRef{
-				Name: buildName,
-			},
-			ServiceAccount: &buildv1alpha1.ServiceAccount{
-				Generate: true,
-			},
-		},
-	}
-}

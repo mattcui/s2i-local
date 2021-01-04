@@ -13,8 +13,7 @@ require (
 	github.com/spf13/cobra v1.1.1
 	github.com/spf13/viper v1.7.1
 	github.com/stretchr/testify v1.6.1 // indirect
-	github.com/tektoncd/cli v0.15.0
-	github.com/tektoncd/pipeline v0.19.0
+	github.com/tektoncd/cli v0.15.0 // indirect
 	golang.org/x/sys v0.0.0-20201201145000-ef89a241ccb3 // indirect
 	golang.org/x/text v0.3.4 // indirect
 	k8s.io/api v0.19.2

@@ -17,55 +17,73 @@ limitations under the License.
 package builds
 
 import (
-	"context"
-	"fmt"
-	"github.com/tektoncd/cli/pkg/cmd/pipelinerun"
-	"strings"
-
-	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/tektoncd/cli/pkg/cmd/taskrun"
-	"github.com/tektoncd/cli/pkg/options"
-	tknv1beta1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
-	"github.ibm.com/cuixuex/s2i-local/pkg/constants"
+	buildv1alpha1 "github.com/shipwright-io/build/pkg/apis/build/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Run executes the provided TaskRun with the provided options applied, and returns
-// the fully-qualified image digest (or error) upon completion.
-func Run(ctx context.Context, image string, tr *tknv1beta1.TaskRun, opt *options.LogOptions, opts ...CancelableTaskOption) (name.Digest, error) {
-	tr, err := RunTask(ctx, tr, opt, opts...)
-	if err != nil {
-		return name.Digest{}, err
-	}
+// Options holds configuration options specific to Dockerfile builds
+type Options struct {
+	// Dockerfile is the path to the Dockerfile within the build context.
+	//Dockerfile string
+	//
+	//// The extra kaniko arguments for handling things like insecure registries
+	//KanikoArgs []string
 
-	for _, result := range tr.Status.TaskRunResults {
-		if result.Name != constants.ImageDigestResult {
-			continue
-		}
-		value := strings.TrimSpace(result.Value)
+	// Build name
+	Name string
 
-		// Extract the constants.ImageDigestResult result.
-		return name.NewDigest(image + "@" + value)
-	}
-	return name.Digest{}, fmt.Errorf("taskrun did not produce an %q result", constants.ImageDigestResult)
+	// Target image
+	ImageURL string
+
+	// secret which is used to push target image
+	SecretName string
+
+	// StrategyName is the BuildStrategy
+	StrategyName string
 }
 
-func streamLogs(ctx context.Context, opt *options.LogOptions) error {
-	// TODO(mattmoor): This should take a context so that it can be cancelled.
-	errCh := make(chan error)
-	go func() {
-		defer close(errCh)
-		switch {
-		case opt.TaskrunName != "":
-			errCh <- taskrun.Run(opt)
-		case opt.PipelineRunName != "":
-			errCh <- pipelinerun.Run(opt)
-		}
-	}()
+// Build returns a Build object for performing a Dockerfile build over the
+// provided source and publishing to the target tag.
+func Build(opt Options) *buildv1alpha1.Build {
+	buildStrategy := buildv1alpha1.ClusterBuildStrategyKind
 
-	select {
-	case err := <-errCh:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
+	return &buildv1alpha1.Build{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: opt.Name,
+		},
+		Spec: buildv1alpha1.BuildSpec{
+			Source: buildv1alpha1.GitSource{
+				URL: "https://github.com/zhangtbj/empty-for-local-build",
+			},
+			StrategyRef: &buildv1alpha1.StrategyRef{
+				Name: opt.StrategyName,
+				Kind: &buildStrategy,
+			},
+			Output: buildv1alpha1.Image{
+				ImageURL: opt.ImageURL,
+				SecretRef: &corev1.LocalObjectReference{
+					Name: opt.SecretName,
+				},
+			},
+		},
 	}
 }
+
+// BuildRun returns a BuildRun object
+func BuildRun(buildName string) *buildv1alpha1.BuildRun {
+	return &buildv1alpha1.BuildRun{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: buildName + "buildrun",
+		},
+		Spec: buildv1alpha1.BuildRunSpec{
+			BuildRef: &buildv1alpha1.BuildRef{
+				Name: buildName,
+			},
+			ServiceAccount: &buildv1alpha1.ServiceAccount{
+				Generate: true,
+			},
+		},
+	}
+}
+

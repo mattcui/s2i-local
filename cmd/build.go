@@ -18,7 +18,7 @@ package cmd
 import (
 	"context"
 	"errors"
-	"fmt"
+	buildv1alpha1 "github.com/shipwright-io/build/pkg/apis/build/v1alpha1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -29,19 +29,17 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/mattmoor/mink/pkg/kontext"
 
+	"github.com/mattmoor/mink/pkg/command"
 	buildClient "github.com/shipwright-io/build/pkg/client/build/clientset/versioned"
+	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"github.ibm.com/cuixuex/s2i-local/pkg/builds"
 	"github.ibm.com/cuixuex/s2i-local/pkg/builds/buildpacks"
 	"github.ibm.com/cuixuex/s2i-local/pkg/builds/dockerfile"
-	"io"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
 	"knative.dev/pkg/injection"
 	"knative.dev/pkg/signals"
-	"time"
-
-	"github.com/mattmoor/mink/pkg/command"
-	"github.com/spf13/cobra"
-	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
 )
 
 func NewBuildCommand(ctx context.Context) *cobra.Command {
@@ -90,41 +88,38 @@ type BuildOptions struct {
 	// tag is the processed version of ImageName that is populated while validating it.
 	tag name.Tag
 
-	ServiceAccount string
-
 	Name string
 
 	SecretName string
 }
 
-const activityTimeout = 30 * time.Second
 const SourceImageSuffix = "_source"
 
 // Validate implements Interface
 func (opts *BuildOptions) Validate(cmd *cobra.Command, args []string) error {
 	_ = viper.BindPFlags(cmd.Flags())
-	opts.ImageName = viper.GetString("image")
 
 	opts.Name = viper.GetString("name")
 	if opts.Name == "" {
-		return errors.New("image url is required")
-	} else {
-		opts.Name = viper.GetString("name")
+		return errors.New("the name of Build is required")
 	}
 
 	// See if we're in "kontext mode"
 	opts.Directory = viper.GetString("directory")
 
-	opts.SecretName = viper.GetString("secret")
+	opts.SecretName = viper.GetString("registry-secret")
 	if opts.SecretName == "" {
 		opts.SecretName = "icr-knbuild"
 	}
 
-	opts.Strategy = viper.GetString("strategy")
-	if opts.Strategy != "" && opts.Strategy != "kaniko" && opts.Strategy != "buildpack" {
+	opts.Strategy = viper.GetString("strategy") + "-local"
+	if opts.Strategy == "" {
+		return errors.New("strategy is required")
+	} else if opts.Strategy != "kaniko-local" && opts.Strategy != "buildpacks-local" {
 		return errors.New("not supported strategy specified, only support 'kaniko' and 'buildpack'")
 	}
 
+	opts.ImageName = viper.GetString("image")
 	if opts.ImageName == "" {
 		return errors.New("image url is required")
 	} else if tag, err := name.NewTag(opts.ImageName, name.WeakValidation); err != nil {
@@ -141,11 +136,12 @@ func (opts *BuildOptions) AddFlags(cmd *cobra.Command) {
 	cmd.Flags().StringP("name", "n", "", "The build name")
 	cmd.Flags().StringP("directory", "d", ".", "The directory to bundle up")
 	cmd.Flags().StringP("image", "i", "", "The image to generate and publish")
-	cmd.Flags().StringP("strategy", "s", "local", "The build strategy to build the image")
-	cmd.Flags().StringP("secret", "e", "icr-knbuild", "The secret used to push target image and pull bundled source code image")
+	cmd.Flags().StringP("strategy", "s", "", "The build strategy to build the image")
+	cmd.Flags().StringP("registry-secret", "r", "icr-knbuild", "The secret used to push target image and pull bundled source code image")
 
 	_ = cmd.MarkPersistentFlagRequired("name")
 	_ = cmd.MarkPersistentFlagRequired("image")
+	_ = cmd.MarkPersistentFlagRequired("strategy")
 }
 
 func (opts *BuildOptions) bundle(ctx context.Context) (name.Digest, error) {
@@ -166,7 +162,7 @@ func (opts *BuildOptions) Execute(cmd *cobra.Command, args []string) error {
 	ctx := opts.GetContext(cmd)
 	spew.Dump("ctx: %v", ctx)
 
-	sourceDigest, err := opts.bundle(ctx)
+	_, err := opts.bundle(ctx)
 	if err != nil {
 		return err
 	}
@@ -174,19 +170,10 @@ func (opts *BuildOptions) Execute(cmd *cobra.Command, args []string) error {
 	spew.Dump("name: ", opts.Name)
 	spew.Dump("secret: ", opts.SecretName)
 	spew.Dump("imageURL: ", opts.ImageName)
-	// Run the produced Build definition to completion, streaming logs to stdout, and
-	// returng the digest of the produced image.
-	var digest name.Digest
-	if opts.Strategy == "kaniko" {
-		err = opts.build(ctx, sourceDigest, cmd.OutOrStderr())
-	} else if opts.Strategy == "buildpack" {
-		digest, err = opts.buildpack(ctx, sourceDigest, cmd.OutOrStderr())
-	}
+	err = opts.build(ctx)
 	if err != nil {
 		return err
 	}
-
-	fmt.Fprintf(cmd.OutOrStdout(), "%s\n", digest.String())
 
 	return nil
 }
@@ -196,26 +183,28 @@ func (opts *BuildOptions) GetContext(cmd *cobra.Command) context.Context {
 	return opts.ctx
 }
 
-func (opts *BuildOptions) build(ctx context.Context, sourceDigest name.Digest, w io.Writer) error {
-	//tag, err := name.NewTag(opts.ImageName, name.WeakValidation)
-	//if err != nil {
-	//	return err
-	//}
+func (opts *BuildOptions) build(ctx context.Context) error {
 
 	// Create a ClusterBuildStrategy definition
-	cbs := dockerfile.ClusterBuildStrategy()
+	var cbs *buildv1alpha1.ClusterBuildStrategy
+	if opts.Strategy == "kaniko-local" {
+		cbs = dockerfile.KanikoClusterBuildStrategy()
+	} else if opts.Strategy == "buildpacks-local" {
+		cbs = buildpacks.BuildpackClusterBuildStrategy()
+	}
 	spew.Dump("cbs: ", cbs)
 
 	// Create a Build definition
-	b := dockerfile.Build(dockerfile.Options{
-		Name:       opts.Name,
-		ImageURL:   opts.ImageName,
-		SecretName: opts.SecretName,
+	b := builds.Build(builds.Options{
+		Name:         opts.Name,
+		ImageURL:     opts.ImageName,
+		SecretName:   opts.SecretName,
+		StrategyName: opts.Strategy,
 	})
 	b.Namespace = command.Namespace()
 
 	// Create a BuildRun definition
-	br := dockerfile.BuildRun(opts.Name)
+	br := builds.BuildRun(opts.Name)
 	br.Namespace = command.Namespace()
 
 	var BuildClientSet *buildClient.Clientset
@@ -249,19 +238,6 @@ func (opts *BuildOptions) build(ctx context.Context, sourceDigest name.Digest, w
 	}
 
 	return nil
-}
-
-func (opts *BuildOptions) buildpack(ctx context.Context, sourceDigest name.Digest, w io.Writer) (name.Digest, error) {
-	tag, err := name.NewTag(opts.ImageName, name.WeakValidation)
-	if err != nil {
-		return name.Digest{}, err
-	}
-
-	// Create a Build definition for turning the source into an image via CNCF Buildpacks.
-	tr := buildpacks.Build(ctx, sourceDigest, tag)
-	tr.Namespace = command.Namespace()
-
-	return name.Digest{}, nil
 }
 
 // NewClient return a build Client

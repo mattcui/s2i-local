@@ -17,177 +17,110 @@ limitations under the License.
 package buildpacks
 
 import (
-	"context"
-
 	"github.com/ghodss/yaml"
-	"github.com/google/go-containerregistry/pkg/name"
-	tknv1beta1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
-	"github.ibm.com/cuixuex/s2i-local/pkg/constants"
+	buildv1alpha1 "github.com/shipwright-io/build/pkg/apis/build/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"knative.dev/pkg/ptr"
-)
-
-const (
-	// BuildpackImage defines the name of the default buildpack builder image
-	// with which to execute the buildpack lifecycle.  We default to Paketo,
-	// see other options below.
-	//
-	// For GCP see: http://github.com/GoogleCloudPlatform/buildpacks
-	//  - gcr.io/buildpacks/builder
-	//
-	// For Boson see: https://github.com/boson-project/faas/blob/main/buildpacks/builder.go#L25
-	//  - Quarkus: quay.io/boson/faas-quarkus-builder
-	//  - Node.js: quay.io/boson/faas-nodejs-builder
-	//  - Go:      quay.io/boson/faas-go-builder
-	BuildpackImage = "docker.io/paketobuildpacks/builder:full"
 )
 
 var (
-	// ExtractDigestImageString holds a reference to a built image of ./cmd/extract-digest
-	// See ./hack/build-flags.sh for how this is replaced at link-time.
-	//ExtractDigestImageString = "ghcr.io/mattmoor/github.com/mattmoor/mink/cmd/extract-digest:latest"
-	//// ExtractDigestImage is where we publish ./cmd/extract-digest
-	//ExtractDigestImage, _ = name.ParseReference(ExtractDigestImageString)
-
-	// BuildpackTaskString holds the raw definition of the Buildpack task.
+	// BuildpackBuildStrategyString holds the raw definition of the Buildpack strategy.
 	// We export this into ./examples/buildpack.yaml
-	BuildpackTaskString = `
-apiVersion: tekton.dev/v1beta1
-kind: Task
+	BuildpackBuildStrategyString = `
+---
+apiVersion: build.dev/v1alpha1
+kind: ClusterBuildStrategy
 metadata:
-  name: buildpack
+  name: buildpacks-local
 spec:
-  description: "An example buildpack task illustrating some of the parameter processing."
-  params:
-    - name: source-bundle
-      description: A self-extracting container image of source
-    - name: image-target
-      description: Where to publish an image.
-
-    - name: descriptor
-      default: "./project.toml"
-      description: |
-        The path to the project descriptor relative to the source bundle.
-        For more information: https://buildpacks.io/docs/app-developer-guide/using-project-descriptor/
-    - name: builder
-      default: "docker.io/paketobuildpacks/builder:full"
-      description: |
-        The image uri for the builder to execute.  Some example builders:
-
-        Paketo (default): docker.io/paketobuildpacks/builder:full
-
-        GCP: gcr.io/buildpacks/builder
-
-        Boson (Quarkus): quay.io/boson/faas-quarkus-builder
-        Boson (Node.js): quay.io/boson/faas-nodejs-builder
-        Boson (Go): quay.io/boson/faas-go-builder
-
-        For more information on builders, see: https://buildpacks.io/docs/concepts/components/builder/
-
-    # TODO(mattmoor): There is not a good way to support integer substitutions in tekton,
-    # so we cannot practically make user-id and group-id parameters.
-
-  results:
-    - name: image-digest
-      description: The digest of the resulting image.
-
-  steps:
+  buildSteps:
     - name: prepare
-      image: ghcr.io/mattmoor/distroless/base:debug
-      workingDir: /workspace
-      command: ["sh"]
+      image: docker.io/paketobuildpacks/builder:full
+      securityContext:
+        runAsUser: 0
+        capabilities:
+          add: 
+            - CHOWN
+      command:
+        - /bin/bash
       args:
-        - "-c"
-        - |-
-          chown -R "1000:1000" "/tekton/home" &&
-          chown -R "1000:1000" "/layers" &&
-          chown -R "1000:1000" "/cache" &&
-          chown -R "1000:1000" "/workspace"
-      volumeMounts: &mounts
+        - -c
+        - >
+          chown -R "1000:1000" /workspace/source &&
+          chown -R "1000:1000" /tekton/home &&
+          chown -R "1000:1000" /cache &&
+          chown -R "1000:1000" /layers
+      resources:
+        limits:
+          cpu: 500m
+          memory: 1Gi
+        requests:
+          cpu: 250m
+          memory: 65Mi
+      volumeMounts:
+        - name: cache-dir
+          mountPath: /cache
         - name: layers-dir
           mountPath: /layers
-        - name: empty-dir
-          mountPath: /cache
-        - name: platform-dir
-          mountPath: /platform
-
     - name: extract-bundle
-      image: $(params.source-bundle)
+      image: $(build.output.image)_source
       workingDir: /workspace
-      securityContext: &run-as
+      securityContext:
         runAsUser: 1000
         runAsGroup: 1000
-
-    - name: create
+    - name: build-and-push
       image: docker.io/paketobuildpacks/builder:full
-      workingDir: /workspace
-      imagePullPolicy: Always
-      command: ["/cnb/lifecycle/creator"]
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      command:
+        - /cnb/lifecycle/creator
       args:
-        - "-layers=/layers"
-        - "-app=/workspace"
-        - "-cache-dir=/cache"
-        - "-platform=/platform"
-        - "-uid=1000"
-        - "-gid=1000"
-        - "$(params.image-target)"
-      env:
-      - name: DOCKER_CONFIG
-        value: /tekton/home/.docker
-      volumeMounts: *mounts
-      securityContext: *run-as
-
-  volumes:
-    - name: platform-dir
-      emptyDir: {}
-    - name: layers-dir
-      emptyDir: {}
-    - name: empty-dir
-      emptyDir: {}
+        - -app=/workspace
+        - -cache-dir=/cache
+        - -layers=/layers
+        - $(build.output.image)
+      resources:
+        limits:
+          cpu: 500m
+          memory: 1Gi
+        requests:
+          cpu: 250m
+          memory: 65Mi
+      volumeMounts:
+        - name: cache-dir
+          mountPath: /cache
+        - name: layers-dir
+          mountPath: /layers
 `
 
 	// BuildpackTask is the parsed form of BuildpackTaskString.
-	BuildpackTask tknv1beta1.Task
+	BuildpackBuildStrategy buildv1alpha1.ClusterBuildStrategy
 )
 
-func init() {
-	//// Replace the ko strings we use for the sample with the values the build process has injected.
-	//substitutions := map[string]string{
-	//	"ko://github.com/mattmoor/mink/cmd/platform-setup": PlatformSetupImageString,
-	//	"ko://github.com/mattmoor/mink/cmd/extract-digest": ExtractDigestImageString,
-	//}
-	//
-	//raw := BuildpackTaskString
-	//for k, v := range substitutions {
-	//	raw = strings.ReplaceAll(raw, k, v)
-	//}
+// Options holds configuration options specific to Dockerfile builds
+type Options struct {
+	// Build name
+	Name string
 
-	if err := yaml.Unmarshal([]byte(BuildpackTaskString), &BuildpackTask); err != nil {
+	// Target image
+	ImageURL string
+
+	// secret which is used to push target image
+	SecretName string
+}
+
+func init() {
+	if err := yaml.Unmarshal([]byte(BuildpackBuildStrategyString), &BuildpackBuildStrategy); err != nil {
 		panic(err)
 	}
 }
 
-// Build synthesizes a TaskRun definition that evaluates the buildpack lifecycle with the
-// given options over the provided source.
-func Build(ctx context.Context, source name.Reference, target name.Tag) *tknv1beta1.TaskRun {
-	return &tknv1beta1.TaskRun{
+// BuildpackClusterBuildStrategy returns a ClusterBuildStrategy object for performing a Buildpacks local build.
+func BuildpackClusterBuildStrategy() *buildv1alpha1.ClusterBuildStrategy {
+	return &buildv1alpha1.ClusterBuildStrategy{
 		ObjectMeta: metav1.ObjectMeta{
-			GenerateName: "buildpack-",
+			Name: "buildpacks-local",
 		},
-		Spec: tknv1beta1.TaskRunSpec{
-			PodTemplate: &tknv1beta1.PodTemplate{
-				EnableServiceLinks: ptr.Bool(false),
-			},
-
-			Params: []tknv1beta1.Param{{
-				Name:  constants.SourceBundleParam,
-				Value: *tknv1beta1.NewArrayOrString(source.String()),
-			}, {
-				Name:  constants.ImageTargetParam,
-				Value: *tknv1beta1.NewArrayOrString(target.String()),
-			}},
-
-			TaskSpec: BuildpackTask.Spec.DeepCopy(),
-		},
+		Spec: *BuildpackBuildStrategy.Spec.DeepCopy(),
 	}
 }
