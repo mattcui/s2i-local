@@ -27,5 +27,6 @@ replace github.com/spf13/cobra => github.com/chmouel/cobra v0.0.0-20200107083527
 replace (
 	k8s.io/api => k8s.io/api v0.18.8
 	k8s.io/client-go => k8s.io/client-go v0.18.8
+	k8s.io/apimachinery => k8s.io/apimachinery v0.18.8
 	k8s.io/kube-openapi => k8s.io/kube-openapi v0.0.0-20200410145947-61e04a5be9a6
 )
